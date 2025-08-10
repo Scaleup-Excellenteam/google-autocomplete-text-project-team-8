@@ -10,7 +10,7 @@ from typing import Optional, Tuple
 import argparse
 import sys
 
-from schema import AutoCompleteData, IndexArtifacts
+from schema import AutoCompleteData, IndexArtifacts, Match
 from indexer import build_index, save_index, load_index
 from matcher import find_matches
 
@@ -146,11 +146,24 @@ def get_best_k_completions(prefix: str, k: int = 5) -> List[AutoCompleteData]:
     art = _artifacts()
     matches = list(find_matches(prefix, art))
 
+    # Deduplicate: keep at most one suggestion per sentence_id
+    # Prefer higher score, then smaller offset
+    best_by_sid: dict[int, Match] = {}
+    for m in matches:
+        existing = best_by_sid.get(m.sentence_id)
+        if existing is None:
+            best_by_sid[m.sentence_id] = m
+            continue
+        if (m.score > existing.score) or (m.score == existing.score and m.offset < existing.offset):
+            best_by_sid[m.sentence_id] = m
+
+    deduped = list(best_by_sid.values())
+
     # Sort: higher score first, then alphabetical by sentence
-    matches.sort(key=lambda m: (-m.score, m.sentence_original))
+    deduped.sort(key=lambda m: (-m.score, m.sentence_original))
 
     out: List[AutoCompleteData] = []
-    for m in matches[:k]:
+    for m in deduped[:k]:
         out.append(
             AutoCompleteData(
                 completed_sentence=m.sentence_original,
