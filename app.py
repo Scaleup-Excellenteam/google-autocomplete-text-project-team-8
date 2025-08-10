@@ -204,7 +204,8 @@ def main() -> None:
             print("(no results)")
             continue
         for i, r in enumerate(results, 1):
-            print(f"{i}. {r.completed_sentence} | {r.source_path}:{r.line_no} | offset={r.offset} | score={r.score}")
+            display = r.completed_sentence.strip()
+            print(f"{i}. {display} | {r.source_path}:{r.line_no} | offset={r.offset} | score={r.score}")
 
 
 if __name__ == "__main__":
