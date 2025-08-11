@@ -1,2 +1,5 @@
 protobuf>=4.25.0,<6
+pytest>=7.4,<9
+setuptools>=65
+wheel>=0.41
 
