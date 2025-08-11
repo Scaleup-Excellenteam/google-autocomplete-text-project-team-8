@@ -21,8 +21,8 @@ def _find_exact_offsets(hay_norm: str, needle_norm: str) -> Iterable[int]:
 
 def _original_offset(sentence_original: str, query_norm: str) -> int:
     """
-    Heuristic mapping normalized window back to original; for POC do a casefolded literal search.
-    This may be off when punctuation breaks alignment; acceptable for POC.
+    Mapping normalized window back to original; for POC do a casefolded literal search.
+    This may be off when punctuation breaks alignment.
     """
     low = sentence_original.casefold()
     j = low.find(query_norm)

@@ -1,7 +1,6 @@
 from __future__ import annotations
 from pathlib import Path
 from typing import Iterator
-import pickle
 
 from schema import IndexArtifacts
 from utils import norm
@@ -47,11 +46,4 @@ def build_index(root_dir: str) -> IndexArtifacts:
     )
 
 
-def save_index(art: IndexArtifacts, path: str = "artifacts.pkl") -> None:
-    with open(path, "wb") as f:
-        pickle.dump(art, f, protocol=pickle.HIGHEST_PROTOCOL)
-
-
-def load_index(path: str = "artifacts.pkl") -> IndexArtifacts:
-    with open(path, "rb") as f:
-        return pickle.load(f)
+# Note: Persistence is handled via protobuf in proto_artifacts.py
