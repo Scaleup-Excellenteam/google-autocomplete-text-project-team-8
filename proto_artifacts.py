@@ -57,11 +57,41 @@ def _build_file_descriptor() -> descriptor_pool.DescriptorPool:
     w2.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
     w2.type = descriptor_pb2.FieldDescriptorProto.TYPE_UINT32
 
+    # message Posting { uint32 sentence_id = 1; uint32 pos = 2; }
+    post_msg = file_proto.message_type.add()
+    post_msg.name = "Posting"
+    pf1 = post_msg.field.add()
+    pf1.name = "sentence_id"
+    pf1.number = 1
+    pf1.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
+    pf1.type = descriptor_pb2.FieldDescriptorProto.TYPE_UINT32
+    pf2 = post_msg.field.add()
+    pf2.name = "pos"
+    pf2.number = 2
+    pf2.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
+    pf2.type = descriptor_pb2.FieldDescriptorProto.TYPE_UINT32
+
+    # message TokenPostings { string token = 1; repeated Posting postings = 2; }
+    tp_msg = file_proto.message_type.add()
+    tp_msg.name = "TokenPostings"
+    tf1 = tp_msg.field.add()
+    tf1.name = "token"
+    tf1.number = 1
+    tf1.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
+    tf1.type = descriptor_pb2.FieldDescriptorProto.TYPE_STRING
+    tf2 = tp_msg.field.add()
+    tf2.name = "postings"
+    tf2.number = 2
+    tf2.label = descriptor_pb2.FieldDescriptorProto.LABEL_REPEATED
+    tf2.type = descriptor_pb2.FieldDescriptorProto.TYPE_MESSAGE
+    tf2.type_name = f".{_PKG}.Posting"
+
     # message IndexArtifacts {
     #   repeated string sentences_original = 1;
     #   repeated string sentences_norm = 2;
     #   repeated SentenceMeta meta = 3;  // index aligned with sentences
     #   repeated WordStart word_starts = 4; // all word-start positions in normalized sentences
+    #   repeated TokenPostings inv_index = 5; // inverted index for tokens → postings
     # }
     art_msg = file_proto.message_type.add()
     art_msg.name = "IndexArtifacts"
@@ -87,6 +117,13 @@ def _build_file_descriptor() -> descriptor_pool.DescriptorPool:
     a4.label = descriptor_pb2.FieldDescriptorProto.LABEL_REPEATED
     a4.type = descriptor_pb2.FieldDescriptorProto.TYPE_MESSAGE
     a4.type_name = f".{_PKG}.WordStart"
+
+    a5 = art_msg.field.add()
+    a5.name = "inv_index"
+    a5.number = 5
+    a5.label = descriptor_pb2.FieldDescriptorProto.LABEL_REPEATED
+    a5.type = descriptor_pb2.FieldDescriptorProto.TYPE_MESSAGE
+    a5.type_name = f".{_PKG}.TokenPostings"
 
     # Register
     pool.Add(file_proto)
@@ -115,7 +152,13 @@ def _get_message_classes() -> Tuple[type, type]:
 SentenceMetaMsg, IndexArtifactsMsg = _get_message_classes()
 
 
-def to_protobuf_bytes(sentences_original: list[str], sentences_norm: list[str], meta: list[tuple[str, int]], word_starts: list[tuple[int, int]] | None = None) -> bytes:
+def to_protobuf_bytes(
+    sentences_original: list[str],
+    sentences_norm: list[str],
+    meta: list[tuple[str, int]],
+    word_starts: list[tuple[int, int]] | None = None,
+    inv_index: dict[str, list[tuple[int, int]]] | None = None,
+) -> bytes:
     msg = IndexArtifactsMsg()
     msg.sentences_original.extend(sentences_original)
     msg.sentences_norm.extend(sentences_norm)
@@ -128,10 +171,19 @@ def to_protobuf_bytes(sentences_original: list[str], sentences_norm: list[str], 
             ws = msg.word_starts.add()
             ws.sentence_id = int(sid)
             ws.pos = int(pos)
+    if inv_index:
+        # Write tokens in sorted order for determinism
+        for tok in sorted(inv_index.keys()):
+            tp = msg.inv_index.add()
+            tp.token = tok
+            for sid, pos in inv_index[tok]:
+                p = tp.postings.add()
+                p.sentence_id = int(sid)
+                p.pos = int(pos)
     return msg.SerializeToString()
 
 
-def from_protobuf_bytes(data: bytes) -> tuple[list[str], list[str], list[tuple[str, int]], list[tuple[int, int]]]:
+def from_protobuf_bytes(data: bytes) -> tuple[list[str], list[str], list[tuple[str, int]], list[tuple[int, int]], dict[str, list[tuple[int, int]]]]:
     msg = IndexArtifactsMsg()
     msg.ParseFromString(data)
     sentences_original = list(msg.sentences_original)
@@ -142,6 +194,15 @@ def from_protobuf_bytes(data: bytes) -> tuple[list[str], list[str], list[tuple[s
     ws_list: list[tuple[int, int]] = []
     for ws in msg.word_starts:
         ws_list.append((int(ws.sentence_id), int(ws.pos)))
-    return sentences_original, sentences_norm, meta_list, ws_list
+    inv_index: dict[str, list[tuple[int, int]]] = {}
+    try:
+        for tp in msg.inv_index:
+            postings: list[tuple[int, int]] = []
+            for p in tp.postings:
+                postings.append((int(p.sentence_id), int(p.pos)))
+            inv_index[tp.token] = postings
+    except Exception:
+        inv_index = {}
+    return sentences_original, sentences_norm, meta_list, ws_list, inv_index
 
 

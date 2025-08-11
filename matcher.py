@@ -1,10 +1,13 @@
 from __future__ import annotations
 from typing import Iterable, Tuple, Optional
+import bisect
 
 from schema import IndexArtifacts, Match
 from utils import norm
 _ws_by_char: dict[str, list[tuple[int, int]]] = {}
 _ws_all: list[tuple[int, int]] = []
+_inv_tokens_sorted: list[str] = []
+_inv_postings_by_token: dict[str, list[tuple[int, int]]] = {}
 
 
 def set_word_starts(ws_list: list[tuple[int, int]], sentences_norm: list[str]) -> None:
@@ -21,6 +24,15 @@ def set_word_starts(ws_list: list[tuple[int, int]], sentences_norm: list[str]) -
             continue
         bucket = _ws_by_char.setdefault(ch, [])
         bucket.append((sid, pos))
+
+
+def set_inverted_index(inv_index: dict[str, list[tuple[int, int]]]) -> None:
+    """Initialize the in-memory inverted index structures.
+    inv_index maps token -> list of (sentence_id, pos) where token starts at pos in normalized sentence.
+    """
+    global _inv_tokens_sorted, _inv_postings_by_token
+    _inv_postings_by_token = inv_index or {}
+    _inv_tokens_sorted = sorted(_inv_postings_by_token.keys())
 import re
 from scoring import score_match
 
@@ -307,7 +319,42 @@ def find_matches(query: str, art: IndexArtifacts) -> Iterable[Match]:
     if not qn:
         return []
 
-    # Use precomputed word-start buckets when available
+    # Prefer inverted index when available: prefix range over sorted tokens
+    if _inv_tokens_sorted:
+        # Find token range with prefix qn
+        # If qn contains spaces, only use the first token as prefix anchor
+        prefix = qn.split(" ")[0]
+        if not prefix:
+            return []
+        lo = bisect.bisect_left(_inv_tokens_sorted, prefix)
+        hi = bisect.bisect_right(_inv_tokens_sorted, prefix + "\uffff")
+        produced_any = False
+        for tok in _inv_tokens_sorted[lo:hi]:
+            postings = _inv_postings_by_token.get(tok, [])
+            for sid, j in postings:
+                s_norm = art.sentences_norm[sid]
+                best = _best_prefix_at(s_norm, qn, j)
+                if not best:
+                    continue
+                kind, pos1, start_idx = best
+                score = score_match(qn, kind if kind in ("exact", "sub", "ins", "del") else "exact", (pos1 or None))
+                _, positions = _norm_with_positions(art.sentences_original[sid])
+                off = positions[start_idx] if 0 <= start_idx < len(positions) else 0
+                yield Match(
+                    sentence_id=sid,
+                    sentence_original=art.sentences_original[sid],
+                    sentence_norm=s_norm,
+                    offset=off,
+                    score=score,
+                    meta=art.meta[sid],
+                )
+                produced_any = True
+        if produced_any:
+            return
+        # No exact-prefix candidates via inverted index → fall back to 1-edit path below
+
+    # Fallback path (and default when no inverted index):
+    # Use precomputed word-start buckets to allow 1-edit at the prefix
     primary_starts: list[tuple[int, int]]
     fallback_starts: list[tuple[int, int]] = []
     if _ws_by_char:
@@ -318,8 +365,7 @@ def find_matches(query: str, art: IndexArtifacts) -> Iterable[Match]:
             if ch == ch0:
                 continue
             fallback_starts.extend(lst)
-            if len(fallback_starts) > 20000:
-                break
+            # no hard cap to preserve result ordering per user's request
     else:
         # No precomputed starts; fallback to per-sentence scanning
         for sid, s_norm in enumerate(art.sentences_norm):
@@ -363,6 +409,6 @@ def find_matches(query: str, art: IndexArtifacts) -> Iterable[Match]:
     # First pass: same first-char bucket
     for m in eval_starts(primary_starts):
         yield m
-    # Second pass: limited fallback for first-char substitution
+    # Second pass: fallback for first-char substitution
     for m in eval_starts(fallback_starts):
         yield m

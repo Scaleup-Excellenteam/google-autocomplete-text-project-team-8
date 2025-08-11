@@ -9,7 +9,7 @@ import sys
 from schema import AutoCompleteData, IndexArtifacts, Match
 from proto_artifacts import from_protobuf_bytes
 from matcher import find_matches
-from matcher import set_word_starts
+from matcher import set_word_starts, set_inverted_index
 import json
 import time
 from datetime import datetime, timezone
@@ -21,11 +21,13 @@ _DEFAULT_ARTIFACTS: str = "artifacts.pb"
 @lru_cache(maxsize=1)
 def _load_artifacts_cached(path: str) -> IndexArtifacts:
     data = Path(path).read_bytes()
-    s_orig, s_norm, meta_list, ws_list = from_protobuf_bytes(data)
+    s_orig, s_norm, meta_list, ws_list, inv_index = from_protobuf_bytes(data)
     meta = {i: {"path": p, "line_no": ln} for i, (p, ln) in enumerate(meta_list)}
     if ws_list:
         # initialize matcher buckets
         set_word_starts(ws_list, s_norm)
+    if inv_index:
+        set_inverted_index(inv_index)
     return IndexArtifacts(n=len(s_orig), sentences_original=s_orig, sentences_norm=s_norm, meta=meta)
 
 
@@ -87,6 +89,9 @@ def main() -> None:
     if not Path(_ARTIFACTS_PATH).exists():
         print(f"[error] artifacts file '{_ARTIFACTS_PATH}' not found. Run indexing: python index_app.py --index ./Archive --out {_ARTIFACTS_PATH}", file=sys.stderr)
         sys.exit(1)
+
+    # Eager-load artifacts to warm caches so the first query is fast
+    _ = _artifacts()
 
     print("Autocomplete ready. Type text and press Enter. Type '#' to reset / quit.")
     HISTORY_PATH = "history.json"

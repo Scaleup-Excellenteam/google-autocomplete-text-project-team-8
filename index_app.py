@@ -62,6 +62,23 @@ def _compute_word_starts(sent_norm: str) -> list[int]:
     return starts
 
 
+def _iter_tokens_with_positions(s_norm: str):
+    pos = 0
+    n = len(s_norm)
+    while pos < n:
+        # skip spaces
+        while pos < n and s_norm[pos] == ' ':
+            pos += 1
+        if pos >= n:
+            break
+        start = pos
+        while pos < n and s_norm[pos] != ' ':
+            pos += 1
+        token = s_norm[start:pos]
+        if token:
+            yield token, start
+
+
 def _write_protobuf_artifacts(out_path: Path, art) -> None:
     meta_list: list[tuple[str, int]] = []
     for sid in range(art.n):
@@ -69,10 +86,20 @@ def _write_protobuf_artifacts(out_path: Path, art) -> None:
         meta_list.append((str(m["path"]), int(m["line_no"])) )
     # Precompute word starts across all sentences
     ws: list[tuple[int, int]] = []
+    inv_index: dict[str, list[tuple[int, int]]] = {}
     for sid, s_norm in enumerate(art.sentences_norm):
         for pos in _compute_word_starts(s_norm):
             ws.append((sid, pos))
-    data = to_protobuf_bytes(art.sentences_original, art.sentences_norm, meta_list, word_starts=ws)
+        # Build inverted index: token -> list of (sid, pos)
+        for tok, tpos in _iter_tokens_with_positions(s_norm):
+            inv_index.setdefault(tok, []).append((sid, tpos))
+    data = to_protobuf_bytes(
+        art.sentences_original,
+        art.sentences_norm,
+        meta_list,
+        word_starts=ws,
+        inv_index=inv_index,
+    )
     out_path.write_bytes(data)
 
 
