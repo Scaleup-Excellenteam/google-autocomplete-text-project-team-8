@@ -9,6 +9,7 @@ import sys
 from schema import AutoCompleteData, IndexArtifacts, Match
 from proto_artifacts import from_protobuf_bytes
 from matcher import find_matches
+from matcher import set_word_starts
 
 _ARTIFACTS_PATH: str = "artifacts.pb"
 _DEFAULT_ARTIFACTS: str = "artifacts.pb"
@@ -17,8 +18,11 @@ _DEFAULT_ARTIFACTS: str = "artifacts.pb"
 @lru_cache(maxsize=1)
 def _load_artifacts_cached(path: str) -> IndexArtifacts:
     data = Path(path).read_bytes()
-    s_orig, s_norm, meta_list = from_protobuf_bytes(data)
+    s_orig, s_norm, meta_list, ws_list = from_protobuf_bytes(data)
     meta = {i: {"path": p, "line_no": ln} for i, (p, ln) in enumerate(meta_list)}
+    if ws_list:
+        # initialize matcher buckets
+        set_word_starts(ws_list, s_norm)
     return IndexArtifacts(n=len(s_orig), sentences_original=s_orig, sentences_norm=s_norm, meta=meta)
 
 

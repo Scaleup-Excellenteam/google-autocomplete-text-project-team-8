@@ -10,6 +10,7 @@ from typing import Optional, Tuple
 
 from indexer import build_index
 from proto_artifacts import to_protobuf_bytes
+from utils import norm
 
 
 _DEFAULT_ARCHIVE_DIR: Path = Path("./Archive")
@@ -50,12 +51,27 @@ def _ensure_zip_extracted(zip_path: Path, extract_dest: Path) -> Path:
     return extract_dest
 
 
+def _compute_word_starts(sent_norm: str) -> list[int]:
+    starts: list[int] = []
+    prev_space = True
+    for idx, ch in enumerate(sent_norm):
+        if prev_space and ch != ' ':
+            starts.append(idx)
+        prev_space = (ch == ' ')
+    return starts
+
+
 def _write_protobuf_artifacts(out_path: Path, art) -> None:
     meta_list: list[tuple[str, int]] = []
     for sid in range(art.n):
         m = art.meta[sid]
         meta_list.append((str(m["path"]), int(m["line_no"])) )
-    data = to_protobuf_bytes(art.sentences_original, art.sentences_norm, meta_list)
+    # Precompute word starts across all sentences
+    ws: list[tuple[int, int]] = []
+    for sid, s_norm in enumerate(art.sentences_norm):
+        for pos in _compute_word_starts(s_norm):
+            ws.append((sid, pos))
+    data = to_protobuf_bytes(art.sentences_original, art.sentences_norm, meta_list, word_starts=ws)
     out_path.write_bytes(data)
 
 

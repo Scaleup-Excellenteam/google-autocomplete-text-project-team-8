@@ -8,6 +8,8 @@ class IndexArtifacts:
     sentences_original: List[str]           # sentence_id == index
     sentences_norm: List[str]               # normalized for matching
     meta: Dict[int, Dict[str, int | str]]   # sentence_id -> {"path": str, "line_no": int}
+    # Note: word_starts are stored in protobuf to enable faster matching,
+    # but are not loaded into this dataclass by default to keep memory small.
 
 @dataclass
 class Match:

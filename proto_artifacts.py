@@ -43,10 +43,25 @@ def _build_file_descriptor() -> descriptor_pool.DescriptorPool:
     f2.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
     f2.type = descriptor_pb2.FieldDescriptorProto.TYPE_UINT32
 
+    # message WordStart { uint32 sentence_id = 1; uint32 pos = 2; }
+    ws_msg = file_proto.message_type.add()
+    ws_msg.name = "WordStart"
+    w1 = ws_msg.field.add()
+    w1.name = "sentence_id"
+    w1.number = 1
+    w1.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
+    w1.type = descriptor_pb2.FieldDescriptorProto.TYPE_UINT32
+    w2 = ws_msg.field.add()
+    w2.name = "pos"
+    w2.number = 2
+    w2.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
+    w2.type = descriptor_pb2.FieldDescriptorProto.TYPE_UINT32
+
     # message IndexArtifacts {
     #   repeated string sentences_original = 1;
     #   repeated string sentences_norm = 2;
     #   repeated SentenceMeta meta = 3;  // index aligned with sentences
+    #   repeated WordStart word_starts = 4; // all word-start positions in normalized sentences
     # }
     art_msg = file_proto.message_type.add()
     art_msg.name = "IndexArtifacts"
@@ -66,6 +81,12 @@ def _build_file_descriptor() -> descriptor_pool.DescriptorPool:
     a3.label = descriptor_pb2.FieldDescriptorProto.LABEL_REPEATED
     a3.type = descriptor_pb2.FieldDescriptorProto.TYPE_MESSAGE
     a3.type_name = f".{_PKG}.SentenceMeta"
+    a4 = art_msg.field.add()
+    a4.name = "word_starts"
+    a4.number = 4
+    a4.label = descriptor_pb2.FieldDescriptorProto.LABEL_REPEATED
+    a4.type = descriptor_pb2.FieldDescriptorProto.TYPE_MESSAGE
+    a4.type_name = f".{_PKG}.WordStart"
 
     # Register
     pool.Add(file_proto)
@@ -75,15 +96,18 @@ def _build_file_descriptor() -> descriptor_pool.DescriptorPool:
 def _get_message_classes() -> Tuple[type, type]:
     pool = _build_file_descriptor()
     meta_desc = pool.FindMessageTypeByName(f"{_PKG}.SentenceMeta")
+    ws_desc = pool.FindMessageTypeByName(f"{_PKG}.WordStart")
     art_desc = pool.FindMessageTypeByName(f"{_PKG}.IndexArtifacts")
     # Prefer modern API if available
     if GetMessageClass is not None:  # type: ignore
         SentenceMeta = GetMessageClass(meta_desc)  # type: ignore
+        WordStart = GetMessageClass(ws_desc)  # type: ignore
         IndexArtifactsMsg = GetMessageClass(art_desc)  # type: ignore
         return SentenceMeta, IndexArtifactsMsg
     # Fallback to legacy factory API
     factory = message_factory.MessageFactory(pool)
     SentenceMeta = factory.GetPrototype(meta_desc)  # type: ignore[attr-defined]
+    WordStart = factory.GetPrototype(ws_desc)  # type: ignore[attr-defined]
     IndexArtifactsMsg = factory.GetPrototype(art_desc)  # type: ignore[attr-defined]
     return SentenceMeta, IndexArtifactsMsg
 
@@ -91,7 +115,7 @@ def _get_message_classes() -> Tuple[type, type]:
 SentenceMetaMsg, IndexArtifactsMsg = _get_message_classes()
 
 
-def to_protobuf_bytes(sentences_original: list[str], sentences_norm: list[str], meta: list[tuple[str, int]]) -> bytes:
+def to_protobuf_bytes(sentences_original: list[str], sentences_norm: list[str], meta: list[tuple[str, int]], word_starts: list[tuple[int, int]] | None = None) -> bytes:
     msg = IndexArtifactsMsg()
     msg.sentences_original.extend(sentences_original)
     msg.sentences_norm.extend(sentences_norm)
@@ -99,10 +123,15 @@ def to_protobuf_bytes(sentences_original: list[str], sentences_norm: list[str], 
         m = msg.meta.add()
         m.path = path
         m.line_no = int(line_no)
+    if word_starts:
+        for sid, pos in word_starts:
+            ws = msg.word_starts.add()
+            ws.sentence_id = int(sid)
+            ws.pos = int(pos)
     return msg.SerializeToString()
 
 
-def from_protobuf_bytes(data: bytes) -> tuple[list[str], list[str], list[tuple[str, int]]]:
+def from_protobuf_bytes(data: bytes) -> tuple[list[str], list[str], list[tuple[str, int]], list[tuple[int, int]]]:
     msg = IndexArtifactsMsg()
     msg.ParseFromString(data)
     sentences_original = list(msg.sentences_original)
@@ -110,6 +139,9 @@ def from_protobuf_bytes(data: bytes) -> tuple[list[str], list[str], list[tuple[s
     meta_list: list[tuple[str, int]] = []
     for m in msg.meta:
         meta_list.append((m.path, int(m.line_no)))
-    return sentences_original, sentences_norm, meta_list
+    ws_list: list[tuple[int, int]] = []
+    for ws in msg.word_starts:
+        ws_list.append((int(ws.sentence_id), int(ws.pos)))
+    return sentences_original, sentences_norm, meta_list, ws_list
 
 
