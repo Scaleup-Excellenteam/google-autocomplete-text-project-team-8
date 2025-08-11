@@ -148,7 +148,7 @@ def main() -> None:
                 fh.write(json.dumps(rec, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
         except Exception:
             pass
-        print(f"[info] query time: {(t1 - t0):.1f} seconds")
+        print(f"[info] query time: {(t1 - t0):.2f} seconds")
 
 
 if __name__ == "__main__":

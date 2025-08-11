@@ -9,6 +9,10 @@ _ws_all: list[tuple[int, int]] = []
 _inv_tokens_sorted: list[str] = []
 _inv_postings_by_token: dict[str, list[tuple[int, int]]] = {}
 
+# Result-capped scanning to bound worst-case latency (~2s target)
+_MAX_UNIQUE_SENTENCES: int = 10000
+_MAX_POSTINGS_PER_TOKEN: int = 5000
+
 
 def set_word_starts(ws_list: list[tuple[int, int]], sentences_norm: list[str]) -> None:
     """Provide precomputed word starts from artifacts to speed up matching.
@@ -318,6 +322,8 @@ def find_matches(query: str, art: IndexArtifacts) -> Iterable[Match]:
     qn = norm(query)
     if not qn:
         return []
+    yielded_sids: set[int] = set()
+    yielded_count = 0
 
     # Prefer inverted index when available: prefix range over sorted tokens
     if _inv_tokens_sorted:
@@ -329,9 +335,17 @@ def find_matches(query: str, art: IndexArtifacts) -> Iterable[Match]:
         lo = bisect.bisect_left(_inv_tokens_sorted, prefix)
         hi = bisect.bisect_right(_inv_tokens_sorted, prefix + "\uffff")
         produced_any = False
+        # Iterate tokens in lexicographic order (already ensured by _inv_tokens_sorted)
         for tok in _inv_tokens_sorted[lo:hi]:
             postings = _inv_postings_by_token.get(tok, [])
+            # Postings may be large for frequent tokens; after compaction we have at most one pos per sentence
+            scanned_this_token = 0
             for sid, j in postings:
+                if scanned_this_token >= _MAX_POSTINGS_PER_TOKEN:
+                    break
+                scanned_this_token += 1
+                if sid in yielded_sids:
+                    continue
                 s_norm = art.sentences_norm[sid]
                 best = _best_prefix_at(s_norm, qn, j)
                 if not best:
@@ -349,9 +363,73 @@ def find_matches(query: str, art: IndexArtifacts) -> Iterable[Match]:
                     meta=art.meta[sid],
                 )
                 produced_any = True
+                yielded_sids.add(sid)
+                yielded_count += 1
+                if yielded_count >= _MAX_UNIQUE_SENTENCES:
+                    return
         if produced_any:
             return
-        # No exact-prefix candidates via inverted index → fall back to 1-edit path below
+        # No exact-prefix candidates via inverted index → fall back to 1-edit at token level then word-start
+        # Token-level 1-edit: generate variants and scan their postings
+        alphabet: set[str] = set()
+        for tok in _inv_tokens_sorted[lo:hi]:
+            alphabet.update(tok)
+        # If prefix is common ASCII, seed alphabet to letters+digits to avoid empty set
+        if not alphabet:
+            alphabet = set("abcdefghijklmnopqrstuvwxyz0123456789_")
+
+        variants: set[str] = set()
+        L = len(prefix)
+        # substitutions
+        for i in range(L):
+            for ch in alphabet:
+                if ch == prefix[i]:
+                    continue
+                variants.add(prefix[:i] + ch + prefix[i+1:])
+        # deletions
+        for i in range(L):
+            variants.add(prefix[:i] + prefix[i+1:])
+        # insertions
+        for i in range(L + 1):
+            for ch in alphabet:
+                variants.add(prefix[:i] + ch + prefix[i:])
+
+        produced = False
+        for var in sorted(variants):
+            lo2 = bisect.bisect_left(_inv_tokens_sorted, var)
+            hi2 = bisect.bisect_right(_inv_tokens_sorted, var)
+            for tok in _inv_tokens_sorted[lo2:hi2]:
+                postings2 = _inv_postings_by_token.get(tok, [])
+                scanned_this_token = 0
+                for sid, j in postings2:
+                    if scanned_this_token >= _MAX_POSTINGS_PER_TOKEN:
+                        break
+                    scanned_this_token += 1
+                    if sid in yielded_sids:
+                        continue
+                    s_norm = art.sentences_norm[sid]
+                    best = _best_prefix_at(s_norm, qn, j)
+                    if not best:
+                        continue
+                    kind, pos1, start_idx = best
+                    score = score_match(qn, kind if kind in ("exact", "sub", "ins", "del") else "exact", (pos1 or None))
+                    _, positions = _norm_with_positions(art.sentences_original[sid])
+                    off = positions[start_idx] if 0 <= start_idx < len(positions) else 0
+                    yield Match(
+                        sentence_id=sid,
+                        sentence_original=art.sentences_original[sid],
+                        sentence_norm=s_norm,
+                        offset=off,
+                        score=score,
+                        meta=art.meta[sid],
+                    )
+                    produced = True
+                    yielded_sids.add(sid)
+                    yielded_count += 1
+                    if yielded_count >= _MAX_UNIQUE_SENTENCES:
+                        return
+        if produced:
+            return
 
     # Fallback path (and default when no inverted index):
     # Use precomputed word-start buckets to allow 1-edit at the prefix
@@ -369,6 +447,8 @@ def find_matches(query: str, art: IndexArtifacts) -> Iterable[Match]:
     else:
         # No precomputed starts; fallback to per-sentence scanning
         for sid, s_norm in enumerate(art.sentences_norm):
+            if yielded_count >= _MAX_UNIQUE_SENTENCES:
+                return
             best = _best_prefix_anywhere(s_norm, qn)
             if not best:
                 continue
@@ -384,11 +464,17 @@ def find_matches(query: str, art: IndexArtifacts) -> Iterable[Match]:
                 score=score,
                 meta=art.meta[sid],
             )
+            yielded_count += 1
         return
 
     # Evaluate candidates from precomputed starts
     def eval_starts(starts: list[tuple[int, int]]):
+        nonlocal yielded_count, yielded_sids
         for sid, j in starts:
+            if yielded_count >= _MAX_UNIQUE_SENTENCES:
+                return
+            if sid in yielded_sids:
+                continue
             s_norm = art.sentences_norm[sid]
             best = _best_prefix_at(s_norm, qn, j)
             if not best:
@@ -405,6 +491,8 @@ def find_matches(query: str, art: IndexArtifacts) -> Iterable[Match]:
                 score=score,
                 meta=art.meta[sid],
             )
+            yielded_sids.add(sid)
+            yielded_count += 1
 
     # First pass: same first-char bucket
     for m in eval_starts(primary_starts):

@@ -86,13 +86,19 @@ def _write_protobuf_artifacts(out_path: Path, art) -> None:
         meta_list.append((str(m["path"]), int(m["line_no"])) )
     # Precompute word starts across all sentences
     ws: list[tuple[int, int]] = []
-    inv_index: dict[str, list[tuple[int, int]]] = {}
+    # Build inverted index compacted to earliest position per (token, sentence)
+    inv_map: dict[str, dict[int, int]] = {}
     for sid, s_norm in enumerate(art.sentences_norm):
         for pos in _compute_word_starts(s_norm):
             ws.append((sid, pos))
         # Build inverted index: token -> list of (sid, pos)
         for tok, tpos in _iter_tokens_with_positions(s_norm):
-            inv_index.setdefault(tok, []).append((sid, tpos))
+            by_sid = inv_map.setdefault(tok, {})
+            prev = by_sid.get(sid)
+            if prev is None or tpos < prev:
+                by_sid[sid] = tpos
+    # Convert compact map to lists
+    inv_index: dict[str, list[tuple[int, int]]] = {tok: [(sid, pos) for sid, pos in by_sid.items()] for tok, by_sid in inv_map.items()}
     data = to_protobuf_bytes(
         art.sentences_original,
         art.sentences_norm,
