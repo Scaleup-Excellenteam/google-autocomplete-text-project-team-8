@@ -10,6 +10,9 @@ from schema import AutoCompleteData, IndexArtifacts, Match
 from proto_artifacts import from_protobuf_bytes
 from matcher import find_matches
 from matcher import set_word_starts
+import json
+import time
+from datetime import datetime, timezone
 
 _ARTIFACTS_PATH: str = "artifacts.pb"
 _DEFAULT_ARTIFACTS: str = "artifacts.pb"
@@ -86,6 +89,7 @@ def main() -> None:
         sys.exit(1)
 
     print("Autocomplete ready. Type text and press Enter. Type '#' to reset / quit.")
+    HISTORY_PATH = "history.json"
     while True:
         try:
             q = input("> ")
@@ -96,13 +100,50 @@ def main() -> None:
             print("reset / exit")
             break
 
+        t0 = time.perf_counter()
         results = get_best_k_completions(q)
+        t1 = time.perf_counter()
         if not results:
             print("(no results)")
+            # Log minimal JSON record
+            try:
+                rec = {
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "query": q,
+                    "elapsed_ms": round((t1 - t0), 2),
+                    "results": [],
+                }
+                with open(HISTORY_PATH, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(rec, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+            except Exception:
+                pass
             continue
-        for i, r in enumerate(results, 1):
+        # Show only 5 sentences to user
+        for i, r in enumerate(results[:5], 1):
             display = r.completed_sentence.strip()
-            print(f"{i}. {display} | {r.source_path}:{r.line_no} | offset={r.offset} | score={r.score}")
+            print(f"{i}. {display}")
+        # Log full details
+        try:
+            rec = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "query": q,
+                "elapsed_ms": round((t1 - t0), 2),
+                "results": [
+                    {
+                        "completed_sentence": r.completed_sentence,
+                        "source_path": r.source_path,
+                        "line_no": r.line_no,
+                        "offset": r.offset,
+                        "score": r.score,
+                    }
+                    for r in results
+                ],
+            }
+            with open(HISTORY_PATH, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(rec, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+        except Exception:
+            pass
+        print(f"[info] query time: {(t1 - t0):.1f} seconds")
 
 
 if __name__ == "__main__":

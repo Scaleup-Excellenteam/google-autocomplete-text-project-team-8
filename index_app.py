@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 import sys
 from pathlib import Path
 import shutil
@@ -141,7 +142,10 @@ def main() -> None:
     p.add_argument("--force", action="store_true", help="Force rebuild even if artifacts appear up-to-date")
     args = p.parse_args()
 
+    t0 = time.perf_counter()
     ensure_artifacts(args.out, index_root=args.index, force=args.force)
+    t1 = time.perf_counter()
+    print(f"[info] indexing wall time: {(t1 - t0):.1f} seconds")
 
 
 if __name__ == "__main__":
