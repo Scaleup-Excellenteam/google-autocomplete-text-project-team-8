@@ -45,7 +45,8 @@ def get_best_k_completions(prefix: str, k: int = 5) -> List[AutoCompleteData]:
         return []
 
     art = _artifacts()
-    matches = list(find_matches(prefix, art))
+    # Ask matcher to stop once it has k unique sentences to avoid overscanning when results are sparse
+    matches = list(find_matches(prefix, art, target_k=k))
 
     # Deduplicate: keep at most one suggestion per sentence_id
     # Prefer higher score, then smaller offset

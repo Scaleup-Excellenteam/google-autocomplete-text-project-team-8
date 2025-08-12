@@ -9,9 +9,20 @@ _ws_all: list[tuple[int, int]] = []
 _inv_tokens_sorted: list[str] = []
 _inv_postings_by_token: dict[str, list[tuple[int, int]]] = {}
 
-# Result-capped scanning to bound worst-case latency (~2s target)
+# Result-capped scanning to bound worst-case latency (~2s target) while keeping behavior simple
 _MAX_UNIQUE_SENTENCES: int = 10000
-_MAX_POSTINGS_PER_TOKEN: int = 5000
+_MAX_POSTINGS_PER_TOKEN_EXACT: int = 5000
+_MAX_POSTINGS_TOTAL_EXACT: int = 50000
+
+# 1-edit (token-level) simple bounds
+_MIN_PREFIX_LEN_ED1: int = 4
+_MAX_VARIANTS_ED1: int = 50
+_MAX_POSTINGS_PER_TOKEN_ED1: int = 50
+_MAX_POSTINGS_TOTAL_ED1: int = 1000
+
+# Fallback word-start scanning caps
+_MAX_PRIMARY_STARTS: int = 20000
+_MAX_FALLBACK_STARTS: int = 5000
 
 
 def set_word_starts(ws_list: list[tuple[int, int]], sentences_norm: list[str]) -> None:
@@ -318,7 +329,7 @@ def _match_prefix_one_indel(sentence_norm: str, query_norm: str) -> Tuple[bool, 
     return (False, "ins", 0)
 
 
-def find_matches(query: str, art: IndexArtifacts) -> Iterable[Match]:
+def find_matches(query: str, art: IndexArtifacts, target_k: Optional[int] = None) -> Iterable[Match]:
     qn = norm(query)
     if not qn:
         return []
@@ -335,15 +346,19 @@ def find_matches(query: str, art: IndexArtifacts) -> Iterable[Match]:
         lo = bisect.bisect_left(_inv_tokens_sorted, prefix)
         hi = bisect.bisect_right(_inv_tokens_sorted, prefix + "\uffff")
         produced_any = False
+        total_postings_scanned = 0
         # Iterate tokens in lexicographic order (already ensured by _inv_tokens_sorted)
         for tok in _inv_tokens_sorted[lo:hi]:
             postings = _inv_postings_by_token.get(tok, [])
             # Postings may be large for frequent tokens; after compaction we have at most one pos per sentence
             scanned_this_token = 0
             for sid, j in postings:
-                if scanned_this_token >= _MAX_POSTINGS_PER_TOKEN:
+                if scanned_this_token >= _MAX_POSTINGS_PER_TOKEN_EXACT:
+                    break
+                if total_postings_scanned >= _MAX_POSTINGS_TOTAL_EXACT:
                     break
                 scanned_this_token += 1
+                total_postings_scanned += 1
                 if sid in yielded_sids:
                     continue
                 s_norm = art.sentences_norm[sid]
@@ -365,46 +380,68 @@ def find_matches(query: str, art: IndexArtifacts) -> Iterable[Match]:
                 produced_any = True
                 yielded_sids.add(sid)
                 yielded_count += 1
-                if yielded_count >= _MAX_UNIQUE_SENTENCES:
+                if (target_k is not None and yielded_count >= target_k) or yielded_count >= _MAX_UNIQUE_SENTENCES:
                     return
+            if (target_k is not None and yielded_count >= target_k) or total_postings_scanned >= _MAX_POSTINGS_TOTAL_EXACT:
+                break
         if produced_any:
             return
         # No exact-prefix candidates via inverted index → fall back to 1-edit at token level then word-start
-        # Token-level 1-edit: generate variants and scan their postings
-        alphabet: set[str] = set()
-        for tok in _inv_tokens_sorted[lo:hi]:
-            alphabet.update(tok)
-        # If prefix is common ASCII, seed alphabet to letters+digits to avoid empty set
-        if not alphabet:
-            alphabet = set("abcdefghijklmnopqrstuvwxyz0123456789_")
-
-        variants: set[str] = set()
-        L = len(prefix)
-        # substitutions
-        for i in range(L):
-            for ch in alphabet:
-                if ch == prefix[i]:
+        # Token-level 1-edit: simple, bounded variant generation
+        if len(prefix) >= _MIN_PREFIX_LEN_ED1:
+            alphabet: set[str] = set(prefix) | set("aeiou")
+            variants: list[str] = []
+            L = len(prefix)
+            # substitutions
+            for i in range(L):
+                base = prefix[i]
+                for ch in alphabet:
+                    if ch == base:
+                        continue
+                    variants.append(prefix[:i] + ch + prefix[i+1:])
+                    if len(variants) >= _MAX_VARIANTS_ED1:
+                        break
+                if len(variants) >= _MAX_VARIANTS_ED1:
+                    break
+            # deletions (if room left)
+            if len(variants) < _MAX_VARIANTS_ED1:
+                for i in range(L):
+                    variants.append(prefix[:i] + prefix[i+1:])
+                    if len(variants) >= _MAX_VARIANTS_ED1:
+                        break
+            # insertions (if room left)
+            if len(variants) < _MAX_VARIANTS_ED1:
+                for i in range(L + 1):
+                    for ch in alphabet:
+                        variants.append(prefix[:i] + ch + prefix[i:])
+                        if len(variants) >= _MAX_VARIANTS_ED1:
+                            break
+                    if len(variants) >= _MAX_VARIANTS_ED1:
+                        break
+            # Deduplicate variants while preserving order
+            seen_var: set[str] = set()
+            dedup_variants: list[str] = []
+            for v in variants:
+                if v in seen_var:
                     continue
-                variants.add(prefix[:i] + ch + prefix[i+1:])
-        # deletions
-        for i in range(L):
-            variants.add(prefix[:i] + prefix[i+1:])
-        # insertions
-        for i in range(L + 1):
-            for ch in alphabet:
-                variants.add(prefix[:i] + ch + prefix[i:])
+                seen_var.add(v)
+                dedup_variants.append(v)
+            variants = dedup_variants
 
         produced = False
-        for var in sorted(variants):
-            lo2 = bisect.bisect_left(_inv_tokens_sorted, var)
-            hi2 = bisect.bisect_right(_inv_tokens_sorted, var)
-            for tok in _inv_tokens_sorted[lo2:hi2]:
-                postings2 = _inv_postings_by_token.get(tok, [])
+        if len(prefix) >= _MIN_PREFIX_LEN_ED1:
+            total_postings_scanned_ed1 = 0
+            for var in variants:
+                # Quick membership check
+                postings2 = _inv_postings_by_token.get(var)
+                if not postings2:
+                    continue
                 scanned_this_token = 0
                 for sid, j in postings2:
-                    if scanned_this_token >= _MAX_POSTINGS_PER_TOKEN:
+                    if scanned_this_token >= _MAX_POSTINGS_PER_TOKEN_ED1 or total_postings_scanned_ed1 >= _MAX_POSTINGS_TOTAL_ED1:
                         break
                     scanned_this_token += 1
+                    total_postings_scanned_ed1 += 1
                     if sid in yielded_sids:
                         continue
                     s_norm = art.sentences_norm[sid]
@@ -426,8 +463,10 @@ def find_matches(query: str, art: IndexArtifacts) -> Iterable[Match]:
                     produced = True
                     yielded_sids.add(sid)
                     yielded_count += 1
-                    if yielded_count >= _MAX_UNIQUE_SENTENCES:
+                    if (target_k is not None and yielded_count >= target_k) or yielded_count >= _MAX_UNIQUE_SENTENCES:
                         return
+                if (target_k is not None and yielded_count >= target_k) or total_postings_scanned_ed1 >= _MAX_POSTINGS_TOTAL_ED1:
+                    break
         if produced:
             return
 
@@ -437,12 +476,16 @@ def find_matches(query: str, art: IndexArtifacts) -> Iterable[Match]:
     fallback_starts: list[tuple[int, int]] = []
     if _ws_by_char:
         ch0 = qn[0]
-        primary_starts = _ws_by_char.get(ch0, [])
+        primary_starts = _ws_by_char.get(ch0, [])[:_MAX_PRIMARY_STARTS]
         # Fallback for first-char substitution: try other buckets but cap the scan size
         for ch, lst in _ws_by_char.items():
             if ch == ch0:
                 continue
+            if len(fallback_starts) >= _MAX_FALLBACK_STARTS:
+                break
             fallback_starts.extend(lst)
+            if len(fallback_starts) > _MAX_FALLBACK_STARTS:
+                fallback_starts = fallback_starts[:_MAX_FALLBACK_STARTS]
             # no hard cap to preserve result ordering per user's request
     else:
         # No precomputed starts; fallback to per-sentence scanning
