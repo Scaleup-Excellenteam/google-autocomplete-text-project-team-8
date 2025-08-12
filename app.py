@@ -92,7 +92,11 @@ def main() -> None:
         sys.exit(1)
 
     # Eager-load artifacts to warm caches so the first query is fast
+    print("[info] Loading artifacts ...")
+    _t0 = time.perf_counter()
     _ = _artifacts()
+    _t1 = time.perf_counter()
+    print(f"[info] Artifacts loaded in {(_t1 - _t0):.2f} seconds.")
 
     print("Autocomplete ready. Type text and press Enter. Type '#' to reset / quit.")
     HISTORY_PATH = "history.json"
@@ -123,6 +127,7 @@ def main() -> None:
                     fh.write(json.dumps(rec, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
             except Exception:
                 pass
+            print(f"[info] query time: {(t1 - t0):.2f} seconds")
             continue
         # Show only 5 sentences to user
         for i, r in enumerate(results[:5], 1):
